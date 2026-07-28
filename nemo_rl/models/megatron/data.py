@@ -32,6 +32,7 @@ from nemo_rl.utils.r3_trace import (
     r3_trace_verify_forward_enabled,
     trace_cp_routed_experts,
 )
+import warnings
 
 
 @dataclass
@@ -188,6 +189,14 @@ def get_microbatch_iterator(
         data_iterator_len, pack_seq_dim_size = (
             data.get_microbatch_iterator_for_packable_sequences_len()
         )
+        use_hybrid_ep = cfg["megatron_cfg"]["moe_token_dispatcher_type"] == "flex" \
+                        and cfg["megatron_cfg"]["moe_flex_dispatcher_backend"] == "hybridep"
+        # Hybrid EP requires all EP ranks to have the same number of tokens.
+        # So pad to static shape as WORKAROUND.
+        if use_hybrid_ep:
+            if not hasattr(cfg["megatron_cfg"], "moe_hybridep_pad_uneven_dispatch_inputs") or not cfg["megatron_cfg"]["moe_hybridep_pad_uneven_dispatch_inputs"]:
+                pack_seq_dim_size = cfg["sequence_packing"]["train_mb_tokens"]
+                warnings.warn(f"Using static pack_seq_dim_size: {pack_seq_dim_size}")
         (
             pad_factor,
             pad_packed_seq_to_multiple_of,

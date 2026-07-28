@@ -261,7 +261,12 @@ class MegatronPolicyWorkerImpl(
         # Must be the first CUDA-touching call in this process.
         # With `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1` (set by `configure_worker()`),
         gpu_ids = ray.get_gpu_ids()
-        local_rank = int(gpu_ids[0])
+        if len(gpu_ids) != 0:
+            local_rank = int(gpu_ids[0])
+        elif os.environ.get("LOCAL_RANK") is not None:
+            local_rank = int(os.environ["LOCAL_RANK"])
+        else:
+            local_rank = 0
         os.environ["LOCAL_RANK"] = str(local_rank)
         torch.cuda.set_device(local_rank)
 

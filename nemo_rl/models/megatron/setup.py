@@ -518,6 +518,12 @@ def setup_model_config(
     if "layernorm_epsilon" in config["megatron_cfg"]:
         model_cfg.layernorm_epsilon = config["megatron_cfg"]["layernorm_epsilon"]
 
+    # Optional num_layers override — useful when the run_config.yaml in the
+    # checkpoint reflects the full model but you want to run a shallow proxy
+    # (e.g. 4-layer debug model) without re-converting the checkpoint.
+    if "num_layers" in config["megatron_cfg"]:
+        model_cfg.num_layers = config["megatron_cfg"]["num_layers"]
+
     # Validate chunking configuration
     _validate_chunking_config(config)
 
@@ -659,6 +665,12 @@ def _apply_moe_config(model_cfg: Any, config: PolicyConfig) -> None:
         model_cfg.moe_flex_dispatcher_backend = config["megatron_cfg"][
             "moe_flex_dispatcher_backend"
         ]
+    if "moe_hybridep_pad_uneven_dispatch_inputs" in config["megatron_cfg"]:
+        if not hasattr(model_cfg, "moe_hybridep_pad_uneven_dispatch_inputs"):
+            warnings.warn("Megatron-LM version does not support moe_hybridep_pad_uneven_dispatch_inputs. Setting to False.")
+            config["megatron_cfg"]["moe_hybridep_pad_uneven_dispatch_inputs"] = False
+        else:
+            model_cfg.moe_hybridep_pad_uneven_dispatch_inputs = config["megatron_cfg"]["moe_hybridep_pad_uneven_dispatch_inputs"]
     if "moe_hybridep_num_sms" in config["megatron_cfg"]:
         model_cfg.moe_hybridep_num_sms = config["megatron_cfg"]["moe_hybridep_num_sms"]
 
