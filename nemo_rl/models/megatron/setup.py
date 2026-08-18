@@ -641,6 +641,10 @@ def setup_model_config(
             )
         model_cfg = _merge_model_overrides(model_cfg, model_overrides)
 
+    if "num_layers" in config["megatron_cfg"]:
+        model_cfg.num_layers = config["megatron_cfg"]["num_layers"]
+        print (f'Setting num layers to {model_cfg.num_layers}')
+
     # Apply parallelism settings
     _apply_parallelism_config(model_cfg, config)
 
@@ -877,6 +881,11 @@ def _apply_moe_config(model_cfg: Any, config: PolicyConfig) -> None:
     model_cfg.moe_token_dispatcher_type = config["megatron_cfg"][
         "moe_token_dispatcher_type"
     ]
+    if "moe_router_force_load_balancing" in config["megatron_cfg"]:
+        model_cfg.moe_router_force_load_balancing = config["megatron_cfg"][
+            "moe_router_force_load_balancing"
+        ]
+        print(f"!!!!!! moe_router_force_load_balancing: {model_cfg.moe_router_force_load_balancing}")
     if "inference_moe_token_dispatcher_type" in config["megatron_cfg"]:
         model_cfg.inference_moe_token_dispatcher_type = config["megatron_cfg"][
             "inference_moe_token_dispatcher_type"
@@ -1637,6 +1646,8 @@ def setup_model_and_optimizer(
             pretrained_checkpoint_exists
             and not preload_policy_from_pretrained_for_draft
         )
+    #should_load_checkpoint = False
+    #print (f'!!! Setting should_load_checkpoint to False for debugging')
 
     # Load checkpoint if applicable
     if should_load_checkpoint:
@@ -1870,6 +1881,7 @@ def setup_reference_model_state(
             and checkpoint_exists(ref_checkpoint_config.pretrained_checkpoint)
         )
 
+        #should_load_checkpoint = False
         print("Loading the Reference Model")
 
         if should_load_checkpoint:
