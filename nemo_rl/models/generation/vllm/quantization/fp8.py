@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import os
 import warnings
 from collections.abc import Sequence
@@ -546,9 +547,8 @@ def load_weights(weights, model_runner):
     for k, v in weights:
         # Grouped MoE experts arrive as fused slabs without a ``.weight`` suffix
         # (so `_is_fp8_weight` would skip them) and vLLM's grouped loader cannot
-        # load their per-block scales. Expand them into the per-expert FP8 (w13, w2 -> w1, w2, and w3)
-        # layout, then reshape to 2D [num_experts, out_features, in_features] -> [num_experts*out_features, in_features]
-        # so the block scales can be quantized and routed correctly.
+        # load their scales. Expand them into the per-expert projection layout so
+        # both values and scales route through the standard expert mapping.
         if k.endswith("mlp.experts.gate_up_proj") or k.endswith(
             "mlp.experts.down_proj"
         ):
@@ -566,10 +566,9 @@ def load_weights(weights, model_runner):
                 and experts_module.w2_weight.dtype == torch.float8_e4m3fn
             ):
                 if global_fp8_config.is_mx:
-                    raise NotImplementedError(
-                        "MXFP8 refit does not support grouped MoE expert weights."
-                    )
-                weights_quantized.extend(_expand_grouped_moe_expert_to_fp8(k, v))
+                    weights_quantized.extend(_expand_grouped_moe_expert_to_mxfp8(k, v))
+                else:
+                    weights_quantized.extend(_expand_grouped_moe_expert_to_fp8(k, v))
             else:
                 weights_quantized.append((k, v))
             continue
@@ -774,6 +773,28 @@ def _expand_grouped_moe_expert_to_fp8(key, weight):
             name = f"{base}.{expert_id}.{shard_name}.weight"
             entries.append((name, weight_fp8[expert_id]))
             entries.append((name + "_scale_inv", scale_inv[expert_id]))
+    return entries
+
+
+def _expand_grouped_moe_expert_to_mxfp8(key, weight):
+    """Expand a grouped Qwen3.5 MoE slab into per-expert MXFP8 entries."""
+    base, proj = key.rsplit(".", 1)
+    if proj == "gate_up_proj":
+        intermediate = weight.shape[1] // 2
+        shards = (
+            ("gate_proj", weight[:, :intermediate, :]),
+            ("up_proj", weight[:, intermediate:, :]),
+        )
+    else:
+        shards = (("down_proj", weight),)
+
+    entries = []
+    for shard_name, grouped_moe_expert in shards:
+        for expert_id, expert_weight in enumerate(grouped_moe_expert):
+            value, scale = quantize_mxfp8_weight(expert_weight.contiguous())
+            name = f"{base}.{expert_id}.{shard_name}.weight"
+            entries.append((name, value))
+            entries.append((name + "_scale_from_checkpoint", scale))
     return entries
 
 
@@ -1058,6 +1079,32 @@ def create_weights_mxfp8_moe(
     )
 
 
+def _make_fp8_moe_kernel_compat(make_fp8_moe_kernel, layer, **kwargs):
+    """Call vLLM's make_fp8_moe_kernel across the 0.25/0.28 signature change.
+
+    vLLM 0.25 accepts a ``layer`` kwarg, consumed only when fp8_backend is
+    HUMMING; vLLM 0.28 removed both the kwarg and that backend branch, so
+    passing ``layer`` there raises TypeError. Forwarding it conditionally
+    reproduces each version's own upstream call site exactly: with ``layer``
+    on 0.25 (keeping HUMMING working) and without it on 0.28+ (where nothing
+    consumes it).
+
+    Signature inspection is deliberate over ``try/except TypeError``: a broad
+    except would also swallow unrelated argument mismatches from future vLLM
+    signature changes, hiding real breakage instead of failing loud. A
+    ``**kwargs``-style callee (e.g. a test double) counts as accepting
+    ``layer``.
+    """
+    parameters = inspect.signature(make_fp8_moe_kernel).parameters
+    accepts_layer = "layer" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if accepts_layer:
+        kwargs["layer"] = layer
+    return make_fp8_moe_kernel(**kwargs)
+
+
 def process_weights_after_loading_moe(self, layer) -> None:
     """This function is used to process the weights after loading for a FusedMoE layer.
 
@@ -1107,13 +1154,14 @@ def process_weights_after_loading_moe(self, layer) -> None:
         from vllm.model_executor.layers.quantization.fp8 import make_fp8_moe_kernel
 
         assert self.experts_cls is not None
-        self.moe_kernel = make_fp8_moe_kernel(
+        self.moe_kernel = _make_fp8_moe_kernel_compat(
+            make_fp8_moe_kernel,
+            layer,
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
-            layer=layer,
         )
 
 
@@ -1254,36 +1302,113 @@ def _shuffle_mxfp8_moe_per_expert(
     )
 
 
-def process_weights_after_loading_mxfp8_moe(self, layer) -> None:
-    """Shuffle weights and scales into FlashInfer TRTLLM MXFP8 layout."""
+def _make_mxfp8_refit_scale_buffer(scale):
+    """Preserve the linear E8M0 scale layout used by layerwise refit."""
     from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
-    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
-    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-        swap_w13_to_w31,
-    )
     from vllm.model_executor.parameter import ModelWeightParameter
     from vllm.model_executor.utils import set_weight_attrs
 
+    refit_scale = ModelWeightParameter(
+        data=scale.data,
+        input_dim=2,
+        output_dim=1,
+        weight_loader=scale.weight_loader,
+    )
+    set_weight_attrs(
+        refit_scale,
+        {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value},
+    )
+    return refit_scale
+
+
+def _ensure_mxfp8_moe_kernel(quant_method, layer) -> None:
+    """Create the backend kernel once; refit only replaces its buffers."""
+    if quant_method.moe_kernel is not None:
+        return
+
+    from vllm.model_executor.layers.quantization.fp8 import make_fp8_moe_kernel
+
+    quant_method.moe_quant_config = quant_method.get_fused_moe_quant_config(layer)
+    assert quant_method.moe_quant_config is not None
+    assert quant_method.experts_cls is not None
+    quant_method.moe_kernel = _make_fp8_moe_kernel_compat(
+        make_fp8_moe_kernel,
+        layer,
+        moe_quant_config=quant_method.moe_quant_config,
+        moe_config=quant_method.moe,
+        fp8_backend=quant_method.mxfp8_backend,
+        experts_cls=quant_method.experts_cls,
+        routing_tables=layer._expert_routing_tables(),
+    )
+
+
+def process_weights_after_loading_mxfp8_moe(self, layer) -> None:
+    """Convert MXFP8 weights into the selected backend's runtime layout."""
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+    from vllm.model_executor.layers.quantization.fp8 import (
+        convert_to_fp8_moe_kernel_format,
+    )
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        swap_w13_to_w31,
+    )
+
+    common_layout_backends = {
+        Fp8MoeBackend.DEEPGEMM,
+        Fp8MoeBackend.BATCHED_DEEPGEMM,
+    }
+    if self.mxfp8_backend in common_layout_backends:
+        has_refit_scale_buffers = hasattr(layer, "w13_weight_scale_from_checkpoint")
+        if not has_refit_scale_buffers:
+            # Keep linear refit scales separate from backend-packed runtime scales.
+            layer.w13_weight_scale_from_checkpoint = _make_mxfp8_refit_scale_buffer(
+                layer.w13_weight_scale
+            )
+            layer.w2_weight_scale_from_checkpoint = _make_mxfp8_refit_scale_buffer(
+                layer.w2_weight_scale
+            )
+
+        layer.weight_block_size = self.weight_block_size
+        w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+            fp8_backend=self.mxfp8_backend,
+            layer=layer,
+            w13=layer.w13_weight.data,
+            w2=layer.w2_weight.data,
+            w13_scale=layer.w13_weight_scale_from_checkpoint.data,
+            w2_scale=layer.w2_weight_scale_from_checkpoint.data,
+            # Routed-expert activations are quantized dynamically by the backend.
+            w13_input_scale=None,
+            w2_input_scale=None,
+        )
+        layer.w13_weight.copy_(w13)
+        layer.w2_weight.copy_(w2)
+        if has_refit_scale_buffers:
+            layer.w13_weight_scale.copy_(w13_scale)
+            layer.w2_weight_scale.copy_(w2_scale)
+        else:
+            layer.w13_weight_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
+            layer.w2_weight_scale = torch.nn.Parameter(w2_scale, requires_grad=False)
+        _ensure_mxfp8_moe_kernel(self, layer)
+        return
+
     if self.mxfp8_backend != Fp8MoeBackend.FLASHINFER_TRTLLM:
         raise NotImplementedError(
-            "MXFP8 MoE refit layout conversion only supports FLASHINFER_TRTLLM; "
-            f"got {self.mxfp8_backend}."
+            f"MXFP8 MoE refit does not support {self.mxfp8_backend}."
         )
 
     epilogue_tile_m = 128
     is_gated = self.moe.is_act_and_mul
+    has_refit_scale_buffers = hasattr(layer, "w13_weight_scale_from_checkpoint")
     w13_weight = layer.w13_weight.data
-    if not hasattr(layer, "w13_weight_scale_from_checkpoint"):
+    if not has_refit_scale_buffers:
         w13_scale = layer.w13_weight_scale.data
     else:
         w13_scale = layer.w13_weight_scale_from_checkpoint.data
     if is_gated:
-        # FI TRTLLM gated kernels use W31 ordering. Model checkpoints store
-        # gated projection as W13, so convert once before shuffling.
+        # This gated kernel layout uses W31 ordering; checkpoints store W13.
         w13_weight = swap_w13_to_w31(w13_weight)
         w13_scale = swap_w13_to_w31(w13_scale)
     w2_weight = layer.w2_weight.data
-    if not hasattr(layer, "w2_weight_scale_from_checkpoint"):
+    if not has_refit_scale_buffers:
         w2_scale = layer.w2_weight_scale.data
     else:
         w2_scale = layer.w2_weight_scale_from_checkpoint.data
@@ -1304,38 +1429,13 @@ def process_weights_after_loading_mxfp8_moe(self, layer) -> None:
         w2_scale_shuffled,
     ) = shuffled
 
-    if not hasattr(layer, "w13_weight_scale_from_checkpoint"):
-        layer.w13_weight_scale_from_checkpoint = ModelWeightParameter(
-            data=layer.w13_weight_scale.data,
-            input_dim=2,
-            output_dim=1,
-            weight_loader=layer.w13_weight_scale.weight_loader,
+    if not has_refit_scale_buffers:
+        # Keep linear refit scales separate from backend-packed runtime scales.
+        layer.w13_weight_scale_from_checkpoint = _make_mxfp8_refit_scale_buffer(
+            layer.w13_weight_scale
         )
-        layer.w2_weight_scale_from_checkpoint = ModelWeightParameter(
-            data=layer.w2_weight_scale.data,
-            input_dim=2,
-            output_dim=1,
-            weight_loader=layer.w2_weight_scale.weight_loader,
-        )
-        layer.register_parameter(
-            "w13_weight_scale_from_checkpoint", layer.w13_weight_scale_from_checkpoint
-        )
-        layer.register_parameter(
-            "w2_weight_scale_from_checkpoint", layer.w2_weight_scale_from_checkpoint
-        )
-        print(
-            f"layer.w13_weight_scale_from_checkpoint shape: {layer.w13_weight_scale_from_checkpoint.data.shape}"
-        )
-        print(
-            f"layer.w2_weight_scale_from_checkpoint shape: {layer.w2_weight_scale_from_checkpoint.data.shape}"
-        )
-        set_weight_attrs(
-            layer.w13_weight_scale_from_checkpoint,
-            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value},
-        )
-        set_weight_attrs(
-            layer.w2_weight_scale_from_checkpoint,
-            {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value},
+        layer.w2_weight_scale_from_checkpoint = _make_mxfp8_refit_scale_buffer(
+            layer.w2_weight_scale
         )
         layer.w13_weight_scale = torch.nn.Parameter(
             w13_scale_shuffled, requires_grad=False
@@ -1349,20 +1449,7 @@ def process_weights_after_loading_mxfp8_moe(self, layer) -> None:
     layer.w13_weight.copy_(w13_weight_shuffled)
     layer.w2_weight.copy_(w2_weight_shuffled)
 
-    if self.moe_kernel is None:
-        from vllm.model_executor.layers.quantization.fp8 import make_fp8_moe_kernel
-
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.moe_quant_config is not None
-        assert self.experts_cls is not None
-        self.moe_kernel = make_fp8_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            fp8_backend=self.mxfp8_backend,
-            experts_cls=self.experts_cls,
-            routing_tables=layer._expert_routing_tables(),
-            layer=layer,
-        )
+    _ensure_mxfp8_moe_kernel(self, layer)
 
 
 def process_weights_after_loading_kv(self, layer) -> None:

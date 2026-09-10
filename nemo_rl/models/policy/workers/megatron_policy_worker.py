@@ -1952,7 +1952,13 @@ class MegatronPolicyWorkerImpl(
 
         no_grad.__exit__(None, None, None)
         self.timer.stop("get_logprobs")
-        return BatchedDataDict[LogprobOutputSpec](logprobs=logprobs).to("cpu")
+        cpu_logprobs = torch.empty_like(
+            logprobs,
+            device="cpu",
+            pin_memory=True,
+        )
+        cpu_logprobs.copy_(logprobs, non_blocking=False)
+        return BatchedDataDict[LogprobOutputSpec](logprobs=cpu_logprobs)
 
     def _apply_state_dict_to_model(
         self,
@@ -2405,6 +2411,7 @@ class MegatronPolicyWorkerImpl(
         # Yield the original parameters first.
         for name, tensor in base_iter:
             yield name, tensor
+            del tensor
 
         if include_draft and self.draft_model is not None:
             from nemo_rl.models.megatron.draft import export_eagle_weights_to_hf

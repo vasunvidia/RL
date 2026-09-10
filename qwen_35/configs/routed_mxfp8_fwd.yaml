@@ -1,0 +1,34 @@
+# Qwen3.5 routed-expert MXFP8 forward compute.
+
+policy:
+  megatron_cfg:
+    # The factory selects GroupedLinear, so keep the shared expert ungrouped.
+    use_grouped_gemm_for_shared_expert: false
+    clear_memory_caches_before_refit: true
+    fp8_cfg:
+      enabled: true
+      fp8: e4m3
+      fp8_recipe: custom
+      force_clear_fp8_caches: true
+      # Keep policy parameters in BF16 and quantize only selected GEMM operands.
+      fp8_param: false
+      fp8_quantizer_factory: low_precision_recipes.routed_expert_mxfp8_fwd_factory
+  generation:
+    vllm_cfg:
+      precision: fp8
+      is_mx: true
+      quantization_ignored_layer_kws:
+      - visual
+      - embed_tokens
+      - self_attn
+      - linear_attn
+      - mlp.gate
+      - mlp.shared_expert
+      # NeMo-RL excludes lm_head from MXFP8 rollout quantization by default.
+      # quantization_ignored_layer_names:
+      # - language_model.lm_head
+    vllm_kwargs:
+      moe_backend: ${oc.env:VLLM_MOE_BACKEND,flashinfer_trtllm}
+  # These allocations have independent lifetimes and are reclaimed before refit.
+  release_grads_before_refit: true
+  offload_optimizer_for_refit: true

@@ -13,7 +13,7 @@ readme = { file = "README.md", content-type = "text/markdown" }
 name = "nemo-rl"
 dynamic = ["version", "readme"]
 description = "NeMo RL: A Scalable and Efficient Post-Training Library for Models Ranging from 1 GPU to 1000s, and from Tiny to >100B Parameters"
-requires-python = ">=3.13.14,<3.14"
+requires-python = ">=3.12,<3.13"
 license = { text = "Apache 2.0" }
 maintainers = [
   { name = "Yi-Fu Wu", email = "yifuw@nvidia.com" },
@@ -120,8 +120,8 @@ fsdp = [
   "transformers==5.12.1",
   # +cu13 wheels from GitHub match torch cu130; PyPI often resolves to +cu12 (libcudart.so.12).
   # https://github.com/Dao-AILab/flash-attention/releases/tag/v2.8.1
-  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp313-cp313-linux_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
-  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp313-cp313-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp312-cp312-linux_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
   "flash-attn==2.8.1 ; sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'x86_64')",
   "mamba-ssm",
   "causal-conv1d",
@@ -135,8 +135,8 @@ automodel = [
   # Flash-attn version should be selected to satisfy both TE + vLLM requirements (xformers in particular)
   # https://github.com/NVIDIA/TransformerEngine/blob/v2.3/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L108
   # https://github.com/facebookresearch/xformers/blob/8354497deb2c04c67fbb2e2ad911e86530da0e90/xformers/ops/fmha/flash.py#L76
-  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp313-cp313-linux_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
-  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp313-cp313-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp312-cp312-linux_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
   "flash-attn==2.8.1 ; sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'x86_64')",
   # Mirrors nemo-automodel's own `transformers==5.12.1` pin (Automodel r0.6.0).
   "transformers==5.12.1",
@@ -205,8 +205,8 @@ mcore = [
   # Flash-attn version should be selected to satisfy both TE + vLLM requirements (xformers in particular)
   # https://github.com/NVIDIA/TransformerEngine/blob/v2.3/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L108
   # https://github.com/facebookresearch/xformers/blob/8354497deb2c04c67fbb2e2ad911e86530da0e90/xformers/ops/fmha/flash.py#L76
-  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp313-cp313-linux_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
-  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp313-cp313-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp312-cp312-linux_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64'",
+  "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu13torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
   "flash-attn==2.8.1 ; sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'x86_64')",
   # mamba-ssm/causal-conv1d LOOK redundant (megatron-bridge[ssm] pulls them), but do not
   # remove them: [tool.uv.sources] git pins only attach to direct requirements, and the
@@ -229,7 +229,7 @@ mcore = [
 # without compiling (prepare_metadata_for_build_wheel returns static metadata).
 # The actual ~60-min wheel build is triggered by `uv sync --extra trtllm`.
 trtllm = [
-  "tensorrt-llm==1.3.0rc21",
+  "tensorrt-llm==1.3.0rc21; python_version >= '3.13'",
   "transformers==5.5.4",
   "tilelang==0.1.9; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
@@ -358,8 +358,8 @@ explicit = true
 [tool.uv]
 managed = true
 environments = [
-  "python_version == '3.13' and sys_platform == 'linux' and platform_machine == 'x86_64'",
-  "python_version == '3.13' and sys_platform == 'linux' and platform_machine == 'aarch64'",
+  "python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'aarch64'",
 ]
 preview = true # Enable preview features like extra-build-dependencies
 no-build-isolation-package = [
@@ -444,6 +444,12 @@ override-dependencies = [
   # decord2 is pulled transitively by sglang → qwen-vl-utils[decord] on aarch64 Linux.
   # NeMo-RL no longer calls any decord API (replaced by torchvision/torchaudio).
   "decord2; sys_platform == 'never'",
+  # Force fla-core to 0.5.2 (PR #953 + PR #1000): Blackwell GDN fwd/bwd
+  # autotune restricted to 2 warps for the Triton tl.dot recurrence race.
+  # megatron-core's dev extra would otherwise pin ==0.5.1 (still racy on
+  # VR200/GB300). See fla-org/flash-linear-attention#945 / PR #953.
+  "fla-core==0.5.2",
+  "flash-linear-attention==0.5.2",
 ]
 
 # CVE fixes
@@ -578,17 +584,6 @@ conflicts = [
 
 # Augment build dependencies for packages that need torch at build time
 [tool.uv.extra-build-dependencies]
-flash-attn = [{ requirement = "torch", match-runtime = true }]
-# Git-sourced packages CAN use match-runtime = true if we provide dependency-metadata
-deep_ep = [{ requirement = "torch", match-runtime = true }]
-deep_gemm = [{ requirement = "torch", match-runtime = true }]
-transformer-engine = [{ requirement = "torch", match-runtime = true }]
-transformer-engine-torch = [{ requirement = "torch", match-runtime = true }]
-mamba-ssm = [{ requirement = "torch", match-runtime = true }]
-causal-conv1d = [{ requirement = "torch", match-runtime = true }]
-fast-hadamard-transform = [{ requirement = "torch", match-runtime = true }]
-nv-grouped-gemm = [{ requirement = "torch", match-runtime = true }]
-flash_mla = [{ requirement = "torch", match-runtime = true }]
 
 # torch-memory-saver's build backend reads TMS_CUDA_MAJOR at build time. Keep this in
 # sync with docker/Dockerfile's BASE_IMAGE CUDA major version (currently cuda13.x).

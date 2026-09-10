@@ -1,0 +1,6 @@
+# Routed-expert MXFP8 forward compute with BF16 Adam state.
+
+defaults:
+- grpo_qwen35_397b_swe_openhands_async.yaml
+- routed_mxfp8_fwd.yaml
+- bf16_adam_state.yaml

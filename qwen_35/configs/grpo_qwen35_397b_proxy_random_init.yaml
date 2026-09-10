@@ -1,0 +1,41 @@
+# Four-layer, checkpoint-free policy proxy. The shared proxy helper constructs
+# the nested Qwen3.5 HF text_config override and selects random initialization.
+defaults: grpo_qwen35_397b_swe_openhands_async.yaml
+
+policy:
+  train_global_batch_size: 4
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  max_total_sequence_length: 8192
+  hf_config_overrides: {}
+  megatron_cfg:
+    activation_checkpointing: false
+    tensor_model_parallel_size: 1
+    expert_tensor_parallel_size: 1
+    expert_model_parallel_size: 4
+    pipeline_model_parallel_size: 1
+    sequence_parallel: false
+    freeze_moe_router: false
+    moe_token_dispatcher_type: alltoall
+    first_last_layers_bf16: false
+    num_layers_at_start_in_bf16: 0
+    num_layers_at_end_in_bf16: 0
+    distributed_data_parallel_config:
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+  generation:
+    # The real-GRPO proxy starts vLLM with dummy weights, constructs this same
+    # shallow HF architecture through hf_overrides, then receives the random
+    # Megatron policy weights through the normal initial refit.
+    max_new_tokens: 8192
+    vllm_cfg:
+      tensor_parallel_size: ${oc.decode:${oc.env:GTP,4}}
+      pipeline_parallel_size: ${oc.decode:${oc.env:GPP,1}}
+      expert_parallel_size: ${oc.decode:${oc.env:GEP,4}}
+      max_model_len: 8192
+    vllm_kwargs:
+      max_num_batched_tokens: 8192
+
+cluster:
+  num_nodes: 1
+  gpus_per_node: 4

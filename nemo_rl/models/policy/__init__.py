@@ -299,6 +299,8 @@ class Fp8Config(TypedDict):
     # When True, keep parameters in FP8. Can cause NaN token_mult_prob_error;
     # use with caution (see https://github.com/NVIDIA-NeMo/RL/issues/1164).
     fp8_param: NotRequired[bool]
+    # Python import path for a Transformer Engine CustomRecipe quantizer factory.
+    fp8_quantizer_factory: NotRequired[str]
     # When True, clear Transformer Engine's per-module _fp8_workspaces scratch
     # buffers in offload_before_refit (before weight transfer to the inference
     # engine). These FP8 workspace tensors anchor large CUDA segments and
@@ -595,6 +597,13 @@ class PolicyConfig(TypedDict):
     # This sets the clipping norm for the DTensorPolicyWorkers (Megatron's is called clip_grad)
     max_grad_norm: NotRequired[float | int | None]
     refit_buffer_size_gb: NotRequired[float | int]
+    # Release completed gradient buffers before non-colocated collective refit.
+    # Existing optimizer and FP8 cache knobs control the additional memory released
+    # by the same offload_before_refit lifecycle.
+    release_grads_before_refit: NotRequired[bool]
+    # Move optimizer state to CPU when offload_before_refit runs. Defaults to True
+    # in the Megatron runtime for backward compatibility.
+    offload_optimizer_for_refit: NotRequired[bool]
     optimizer: NotRequired[PytorchOptimizerConfig | None]
     scheduler: NotRequired[
         list[SinglePytorchSchedulerConfig | SinglePytorchMilestonesConfig]

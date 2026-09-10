@@ -1,0 +1,393 @@
+# Qwen 3.5 SWE/OpenHands GRPO recipe.
+#
+# This standalone recipe contains the qualified GBS256 async defaults. Other
+# async batch shapes use explicit launcher overrides; the independently
+# materialized synchronous recipe does not import this file.
+
+grpo:
+  # Overridden by the launcher with ++grpo.seed=<random>.
+  seed: 42
+  max_num_epochs: 100
+  # run_and_time.sh can override the batch-dependent fields for other studies.
+  num_prompts_per_step: ${oc.decode:${oc.env:NUM_PROMPTS_PER_STEP,16}}
+  num_generations_per_prompt: ${oc.decode:${oc.env:NUM_GENERATIONS_PER_PROMPT,16}}
+  max_rollout_turns: 1
+  max_num_steps: ${oc.decode:${oc.env:MAX_STEPS,30}}
+  normalize_rewards: true
+  use_leave_one_out_baseline: true
+  val_period: 1
+  val_start_at: ${oc.decode:${oc.env:VAL_START_AT,18}}
+  val_at_start: false
+  val_at_end: false
+  overlong_filtering: true
+  max_val_samples: null
+  val_batch_size: null
+  val_num_generations_per_prompt: 4
+  # The benchmark stops on grouped pass@4, reported as pass_k.
+  stop_at_validation_metric: pass_k
+  # run_and_time.sh sets this from MLPERF_TARGET_ACCURACY; required since the metric is set.
+  stop_at_validation_threshold: null
+  use_dynamic_sampling: false
+  dynamic_sampling_max_gen_batches: 10
+  batch_multiplier: 1
+  reward_shaping:
+    enabled: false
+    overlong_buffer_length: 128
+    overlong_buffer_penalty: 1
+    max_response_length: ${policy.max_total_sequence_length}
+  adv_estimator:
+    name: grpo
+    normalize_rewards: ${grpo.normalize_rewards}
+    use_leave_one_out_baseline: ${grpo.use_leave_one_out_baseline}
+    minus_baseline: true
+  reward_scaling:
+    enabled: false
+    source_min: 0.0
+    source_max: 1.0
+    target_min: 0.0
+    target_max: 1.0
+  skip_reference_policy_logprobs_calculation: true
+  seq_logprob_error_threshold: 2
+  async_grpo:
+    enabled: true
+    max_trajectory_age_steps: ${oc.decode:${oc.env:MAX_TRAJECTORY_AGE_STEPS,4}}
+    in_flight_weight_updates: true
+    recompute_kv_cache_after_weight_updates: true
+loss_fn:
+  reference_policy_kl_penalty: 0
+  reference_policy_kl_type: k3
+  kl_input_clamp_value: null
+  kl_output_clamp_value: null
+  ratio_clip_min: 0.2
+  ratio_clip_max: 0.28
+  ratio_clip_c: null
+  use_on_policy_kl_approximation: true
+  # Sequence-mask TIS filters actor/generation log-prob mismatch;
+  # force_on_policy_ratio only fixes the PPO ratio at one.
+  truncated_importance_sampling_ratio: 1.002
+  truncated_importance_sampling_ratio_min: 0.999
+  truncated_importance_sampling_type: seq-mask-tis
+  use_importance_sampling_correction: true
+  sequence_level_importance_ratios: false
+  token_level_loss: true
+  force_on_policy_ratio: true
+checkpointing:
+  # Qualified runs measure time-to-target without checkpoints; with
+  # save_optimizer each save grows from ~740 GiB to ~4.4 TiB.
+  enabled: false
+  checkpoint_dir: results/grpo-qwen35-397b-swe-openhands
+  metric_name: val:total_reward/mean
+  higher_is_better: true
+  keep_top_k: 100
+  save_period: 5
+  checkpoint_must_save_by: null
+  save_optimizer: false
+policy:
+  model_name: ${oc.env:CONTAINER_HF_CKPT_PATH}
+  tokenizer:
+    name: ${oc.env:CONTAINER_HF_CKPT_PATH}
+    chat_template_kwargs: null
+  hf_config_overrides: {}
+  train_global_batch_size: ${mul:${grpo.num_prompts_per_step},${grpo.num_generations_per_prompt}}
+  train_micro_batch_size: 1
+  generation_batch_size: 64
+  logprob_batch_size: 1
+  max_total_sequence_length: 65536
+  precision: bfloat16
+  logprob_chunk_size: 2048
+  dtensor_cfg:
+    _v2: false
+    enabled: false
+    cpu_offload: false
+    sequence_parallel: false
+    activation_checkpointing: true
+    tensor_parallel_size: 2
+    context_parallel_size: 1
+    custom_parallel_plan: null
+    clear_cache_every_n_steps: null
+  megatron_cfg:
+    enabled: true
+    # TE 2.18 (TransformerEngine#3056) adds cuDNN fused-attention head-dim-256
+    # bwd on sm10.x; the packed THD path needs cuDNN >= 9.25 + FE 1.26.
+    attention_backend: fused
+    empty_unused_memory_level: 1
+    train_iters: 100000
+    activation_checkpointing: true
+    bias_activation_fusion: true
+    tensor_model_parallel_size: ${oc.decode:${oc.env:TP,4}}
+    expert_tensor_parallel_size: ${oc.decode:${oc.env:ETP,1}}
+    expert_model_parallel_size: ${oc.decode:${oc.env:EP,32}}
+    pipeline_model_parallel_size: ${oc.decode:${oc.env:PP,2}}
+    num_layers_in_first_pipeline_stage: null
+    num_layers_in_last_pipeline_stage: null
+    context_parallel_size: 1
+    pipeline_dtype: ${policy.precision}
+    sequence_parallel: true
+    freeze_moe_router: true
+    # fp32 matches the reference convergence branch.
+    moe_router_dtype: fp32
+    moe_router_load_balancing_type: none
+    moe_router_bias_update_rate: 0.0
+    moe_permute_fusion: false
+    moe_enable_deepep: false
+    moe_token_dispatcher_type: flex
+    moe_shared_expert_overlap: false
+    moe_per_layer_logging: false
+    gradient_accumulation_fusion: false
+    use_fused_weighted_squared_relu: false
+    apply_rope_fusion: false
+    defer_fp32_logits: true
+    optimizer:
+      optimizer: adam
+      lr: ${oc.decode:${oc.env:LEARNING_RATE,1.0e-06}}
+      min_lr: ${policy.megatron_cfg.optimizer.lr}
+      weight_decay: 0.0
+      bf16: true
+      fp16: false
+      params_dtype: float32
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1e-8
+      sgd_momentum: 0.9
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: true
+      optimizer_cpu_offload: false
+      optimizer_offload_fraction: 0.0
+      clip_grad: ${policy.max_grad_norm}
+    scheduler:
+      start_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
+      end_weight_decay: ${policy.megatron_cfg.optimizer.weight_decay}
+      weight_decay_incr_style: constant
+      lr_decay_style: constant
+      lr_decay_iters: 100000
+      lr_warmup_iters: 0
+      lr_warmup_init: 3e-7
+      override_opt_param_scheduler: true
+    distributed_data_parallel_config:
+      grad_reduce_in_fp32: false
+      overlap_grad_reduce: true
+      overlap_param_gather: false
+      use_custom_fsdp: false
+      data_parallel_sharding_strategy: optim_grads_params
+    env_vars:
+      # nemo-rl enables expandable segments for megatron workers by default;
+      # keep the allocator in its qualified mode.
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:False"
+      # HybridEP extensions are rebuilt in the policy actors against the base
+      # stack's torch; expose its libraries to Megatron policy actors only,
+      # prepended to the image's inherited path (/opt/cudart-compat et al.).
+      LD_LIBRARY_PATH: "/usr/local/lib/python3.12/dist-packages/torch/lib:/usr/local/lib/python3.12/dist-packages/nvidia/cudnn/lib:${oc.env:LD_LIBRARY_PATH,''}"
+      NCCL_DEBUG: "WARN"
+      # TE gates the nondeterministic attention kernels behind this flag.
+      NVTE_ALLOW_NONDETERMINISTIC_ALGO: "1"
+      # Print a traceback on SIGSEGV/SIGABRT so worker crashes are attributable.
+      PYTHONFAULTHANDLER: "1"
+      # fla's tilelang GDN kernels are broken on GB300; use triton.
+      FLA_TILELANG: "0"
+      # NCCL knobs must be applied symmetrically (launcher level, not here):
+      # the refit communicator spans megatron AND vLLM ranks, and asymmetric
+      # NCCL env wedges its init.
+    checkpoint:
+      async_strategy: mcore
+    mtp_loss_scaling_factor: 0.0
+    mtp_num_layers: 0
+    mtp_use_repeated_layer: false
+    mtp_detach_heads: true
+    moe_flex_dispatcher_backend: hybridep
+    moe_hybridep_num_sms: 32
+  draft:
+    enabled: false
+    model_name: null
+    loss_weight: 0.1
+    num_layers: null
+    aux_layer_indices: null
+  dynamic_batching:
+    enabled: false
+    train_mb_tokens: ${mul:${policy.max_total_sequence_length},${policy.train_micro_batch_size}}
+    logprob_mb_tokens: ${mul:${policy.max_total_sequence_length},${policy.logprob_batch_size}}
+    sequence_length_round: 64
+  sequence_packing:
+    # Required: without packing a single 65k rollout pads the whole batch,
+    # and pad tokens overload single-EP-rank alltoall/GEMM buffers (frozen
+    # router, no load balancing).
+    enabled: true
+    train_mb_tokens: ${mul:${policy.max_total_sequence_length},${policy.train_micro_batch_size}}
+    logprob_mb_tokens: ${mul:${policy.max_total_sequence_length},${policy.logprob_batch_size}}
+    algorithm: modified_first_fit_decreasing
+    sequence_length_round: 64
+  make_sequence_length_divisible_by: 512
+  max_grad_norm: ${oc.decode:${oc.env:MAX_GRAD_NORM,0.125}}
+  offload_optimizer_for_logprob: false
+  optimizer: null
+  scheduler:
+  - name: torch.optim.lr_scheduler.ConstantLR
+    kwargs:
+      factor: 1.0
+      total_iters: 10000000000
+  - milestones: []
+  generation:
+    backend: vllm
+    max_new_tokens: 65536
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    # Near-greedy validation-only sampling; training keeps the values above.
+    val_temperature: 0.1
+    val_top_p: 0.95
+    val_top_k: null
+    stop_token_ids: null
+    stop_strings: null
+    vllm_cfg:
+      async_engine: true
+      kv_cache_dtype: auto
+      precision: ${policy.precision}
+      tensor_parallel_size: ${oc.decode:${oc.env:GTP,8}}
+      pipeline_parallel_size: ${oc.decode:${oc.env:GPP,1}}
+      expert_parallel_size: ${oc.decode:${oc.env:GEP,8}}
+      gpu_memory_utilization: ${oc.decode:${oc.env:VLLM_GPU_MEMORY_UTILIZATION,0.8}}
+      max_model_len: 65536
+      # Compiled engines are required: eager decode latency starves the SWE
+      # agents into timeouts (zero patches -> no learning signal). Compile
+      # stalls are avoided by the CUDA-graph profile below.
+      enforce_eager: false
+      # Safe with refit: the trainer invalidates the prefix cache on every
+      # refit path. Large latency win for multi-turn SWE episodes.
+      enable_prefix_caching: true
+      enable_vllm_metrics_logger: true
+      vllm_metrics_logger_interval: 10
+      use_deep_gemm: false
+      num_last_layers_in_bf16: 0
+      num_first_layers_in_bf16: 0
+      expose_http_server: true
+      skip_tokenizer_init: false
+      http_server_serving_chat_kwargs:
+        enable_auto_tools: true
+        tool_parser: qwen3_xml
+        reasoning_parser: qwen3
+    vllm_kwargs:
+      language_model_only: true
+      # NRL_-prefixed: vLLM itself reads VLLM_ATTENTION_BACKEND from the env.
+      attention_backend: ${oc.env:NRL_VLLM_ATTENTION_BACKEND,FLASH_ATTN}
+      attention_config:
+        flash_attn_version: ${oc.decode:${oc.env:NRL_VLLM_FLASH_ATTN_VERSION,2}}
+      enable_logging_iteration_details: ${oc.decode:${oc.env:NRL_VLLM_ITERATION_LOGGING,false}}
+      # triton keeps MoE weights in storage layout, refit-safe everywhere.
+      # flashinfer_trtllm repacks them after load, which used to break
+      # refit; the RL#3545 fix (merged upstream) reloads repacked BF16 MoE
+      # weights natively, so the bf16 production profiles opt in via
+      # VLLM_MOE_BACKEND. FP8 keeps triton: the fix is BF16-specific.
+      moe_backend: ${oc.env:VLLM_MOE_BACKEND,triton}
+      enable_chunked_prefill: true
+      max_num_batched_tokens: 16384
+      performance_mode: throughput
+      compilation_config:
+        mode: ${oc.decode:${oc.env:VLLM_COMPILATION_MODE,VLLM_COMPILE}}
+        backend: ${oc.env:VLLM_COMPILATION_BACKEND,inductor}
+        cudagraph_mode: ${oc.env:VLLM_CUDAGRAPH_MODE,FULL_DECODE_ONLY}
+        cudagraph_capture_sizes: ${oc.decode:${oc.env:VLLM_CUDAGRAPH_CAPTURE_SIZES,'[1,2,4,8,16,32,64]'}}
+        pass_config:
+          fuse_allreduce_rms: ${oc.decode:${oc.env:NRL_VLLM_FUSE_ALLREDUCE_RMS,false}}
+      generation_config: vllm
+    colocated:
+      enabled: false
+      resources:
+        gpus_per_node: 4
+        num_nodes: 48
+    mcore_generation_config:
+      buffer_size_gb: 8
+data:
+  max_input_seq_length: null
+  shuffle: false
+  num_workers: 0
+  use_multiple_dataloader: false
+  train:
+    data_path: ${oc.env:NEMO_GYM_SWE_TRAIN_DATA_PATH}
+    repeat: 2
+  validation:
+    data_path: ${oc.env:NEMO_GYM_SWE_VALIDATION_DATA_PATH}
+  default:
+    dataset_name: NemoGymDataset
+    env_name: nemo_gym
+    prompt_file: null
+    system_prompt_file: null
+    processor: nemo_gym_data_processor
+sif_dir: ${oc.env:NEMO_GYM_SWE_SIF_DIR}
+env:
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: false
+  # Keep the env-driven mask_sample key out of rollout batches: its presence
+  # destabilized this sequence-packed workload.
+  should_mask_flagged_samples: false
+  nemo_gym:
+    skip_venv_if_present: true
+    allow_openai_version_skew: true
+    results_dir: /logs/nemo_gym
+    is_trajectory_collection: false
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - responses_api_agents/swe_agents/configs/swebench_openhands_training.yaml
+    use_absolute_ip: true
+    swe_agents_train:
+      responses_api_agents:
+        swe_agents:
+          # Must match the OpenHands commit baked into the image; run_infer.sh
+          # aborts on any commit switch.
+          agent_framework_commit: 3425278db93535edca91580c6a6cbf9e6d9255ce
+          agent_prompt_overrides:
+          - user_prompt_template: /workspace/llm/prompts/openhands/user_prompt.j2
+            system_prompt_template: /workspace/llm/prompts/openhands/system_prompt.j2
+            agent_cls: CodeActAgent
+            diversify_tool_names: false
+          agent_max_turns: 30
+          # Qualified train/validation protocol for the 48-node rollout pool.
+          swebench_agent_timeout: 1800
+          swebench_tests_timeout: 60
+          command_exec_timeout: 60
+          concurrency: ${policy.train_global_batch_size}
+          dataset_path: ${data.train.data_path}
+          # Tried in order per instance; covers both SIF directory layouts.
+          container_formatter:
+          - ${sif_dir}/r2egym/{instance_id}.sif
+          - ${sif_dir}/{instance_id}.sif
+    swe_agents_val:
+      responses_api_agents:
+        swe_agents:
+          agent_framework_commit: ${env.nemo_gym.swe_agents_train.responses_api_agents.swe_agents.agent_framework_commit}
+          agent_prompt_overrides: ${env.nemo_gym.swe_agents_train.responses_api_agents.swe_agents.agent_prompt_overrides}
+          agent_max_turns: 30
+          swebench_agent_timeout: 1800
+          swebench_tests_timeout: 60
+          command_exec_timeout: 60
+          concurrency: 1024
+          dataset_path: ${data.validation.data_path}
+          container_formatter: ${env.nemo_gym.swe_agents_train.responses_api_agents.swe_agents.container_formatter}
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          num_workers: ${oc.decode:${oc.env:NEMO_GYM_NUM_WORKERS,4}}
+          uses_reasoning_parser: true
+          chat_template_kwargs:
+            enable_thinking: false
+          sequential_reasoning_allowed: false
+logger:
+  log_dir: logs
+  num_val_samples_to_print: 0
+  wandb_enabled: false
+  tensorboard_enabled: true
+  mlflow_enabled: false
+  swanlab_enabled: false
+  monitor_gpus: true
+  wandb:
+    project: grpo-dev
+    name: grpo-qwen35-397b-swe-openhands
+  tensorboard: {}
+  gpu_monitoring:
+    collection_interval: 10
+    flush_interval: 10
+mlperf_warmup:
+  generation_requests_per_engine: ${grpo.num_generations_per_prompt}
+  generation_max_tokens: 192
+  generation_http_timeout_s: 900
+cluster:
+  gpus_per_node: 4
+  num_nodes: 64

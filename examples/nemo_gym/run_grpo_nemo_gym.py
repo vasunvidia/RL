@@ -29,6 +29,7 @@ from nemo_rl.algorithms.grpo import (
     ColocatablePolicyInterface,
     EnvironmentInterface,
     GenerationInterface,
+    GRPOSaveState,
     Logger,
     MasterConfig,
     StatefulDataLoader,
@@ -38,6 +39,12 @@ from nemo_rl.algorithms.grpo import (
     setup,
     shutdown_environments,
 )
+from nemo_rl.algorithms.mlperf_grpo_logging import (
+    MLPerfGRPOLogger,
+    MLPerfMetricsLoggerShim,
+    create_mlperf_logger,
+)
+from mlperf_warmup import maybe_run_mlperf_warmup
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_response_data
 from nemo_rl.data_plane.factory import maybe_configure_data_plane_env
@@ -63,6 +70,22 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(description="Run GRPO training with configuration")
     parser.add_argument(
         "--config", type=str, default=None, help="Path to YAML config file"
+    )
+    parser.add_argument(
+        "--random-init-policy",
+        action="store_true",
+        default=os.environ.get("RANDOM_INIT_POLICY", "0") == "1",
+        help="Build a checkpoint-free shallow policy and matching vLLM model",
+    )
+    parser.add_argument(
+        "--proxy-num-layers",
+        type=int,
+        default=(
+            int(os.environ["PROXY_NUM_LAYERS"])
+            if os.environ.get("PROXY_NUM_LAYERS")
+            else None
+        ),
+        help="Number of Qwen3.5 text layers in the random-init proxy",
     )
 
     # Parse known args for the script
@@ -121,6 +144,20 @@ def collect_trajectories(
     policy_generation.finish_generation()
 
 
+def log_mlperf_run_start(
+    mlperf_logger: MLPerfGRPOLogger | None,
+    config: MasterConfig,
+    grpo_state: GRPOSaveState,
+) -> None:
+    """Emit run_start, plus the first train block unless startup validation opens the run."""
+    if mlperf_logger is None:
+        return
+    mlperf_logger.log_init_stop_run_start()
+    start_step = int(grpo_state.total_steps)
+    if not (config.grpo.val_at_start and start_step == 0):
+        mlperf_logger.start_train_block(start_step)
+
+
 def main() -> None:
     """Main entry point."""
     main_start = time.perf_counter()
@@ -145,9 +182,34 @@ def main() -> None:
             config = parse_hydra_overrides(config, overrides)
 
         config = OmegaConf.to_container(config, resolve=True)
-        config = MasterConfig(**config)
-        materialize_vllm_video_config(config.policy, config.data)
-        print("Applied CLI overrides")
+        policy_factory = None
+        if args.random_init_policy:
+            if args.proxy_num_layers is None:
+                raise ValueError("--random-init-policy requires --proxy-num-layers")
+            from model_proxy import (
+                configure_proxy_architecture,
+                make_random_init_policy_factory,
+                register_random_init_policy_worker,
+                validate_random_init_grpo_config,
+            )
+
+            validate_random_init_grpo_config(config)
+            configure_proxy_architecture(config["policy"], args.proxy_num_layers)
+            register_random_init_policy_worker()
+            policy_factory = make_random_init_policy_factory()
+        elif args.proxy_num_layers is not None:
+            raise ValueError("--proxy-num-layers requires --random-init-policy")
+
+    # create_mlperf_logger expects the raw config mapping; call it before the
+    # pydantic MasterConfig conversion. mlperf_warmup is benchmark-local and is
+    # not part of the NRL MasterConfig schema.
+    mlperf_logger = create_mlperf_logger(config)
+    if mlperf_logger is not None:
+        mlperf_logger.log_init_start()
+    mlperf_warmup_cfg = config.pop("mlperf_warmup", None) or {}
+    config = MasterConfig(**config)
+    materialize_vllm_video_config(config.policy, config.data)
+    print("Applied CLI overrides")
 
     # Get the next experiment directory with incremented ID
     config.logger["log_dir"] = get_next_experiment_dir(config.logger["log_dir"])
@@ -220,6 +282,9 @@ The validation set you pass in will directly be used for validation with no addi
         config.grpo.max_val_samples = len(val_dataset)
         config.grpo.val_batch_size = config.grpo.max_val_samples
 
+    if mlperf_logger is not None:
+        mlperf_logger.log_hyperparams(train_dataset, val_dataset)
+
     # Print config
     print("Final config:")
     pprint.pprint(config)
@@ -257,6 +322,7 @@ The validation set you pass in will directly be used for validation with no addi
             train_dataset,
             val_dataset,
             processor=processor,
+            policy_factory=policy_factory,
         )
 
     rl_init_timer.record("total", time.perf_counter() - main_start)
@@ -268,14 +334,35 @@ The validation set you pass in will directly be used for validation with no addi
             print(f"  {label}: {value:.1f}s")
     print("=" * 60 + "\n", flush=True)
 
+    if mlperf_logger is not None:
+        mlperf_logger.log_hyperparams_after_setup(
+            data_parallel_size=policy.data_parallel_size
+        )
+        # All further MLPerf events are driven by the trainers' ordinary
+        # logger.log_metrics calls (validation -> eval blocks, train ->
+        # tracked_stats), so no mlperf hooks are passed into NeMo-RL.
+        logger = MLPerfMetricsLoggerShim(logger, mlperf_logger)
+
     # NeMo-Gym is spun up inside setup() (overlapped with vLLM model load).
     # Bind task_to_env and val_task_to_env for the nemo_gym env.
     # NeMo-Gym is the only environment used by this runner.
     task_to_env = {"nemo_gym": nemo_gym}
     val_task_to_env = task_to_env
 
+    if not is_trajectory_collection:
+        maybe_run_mlperf_warmup(
+            policy=policy,
+            policy_generation=policy_generation,
+            tokenizer=tokenizer,
+            loss_fn=loss_fn,
+            master_config=master_config,
+            warmup_cfg=mlperf_warmup_cfg,
+        )
+
     try:
         if is_trajectory_collection:
+            if mlperf_logger is not None:
+                mlperf_logger.log_init_stop_run_start()
             collect_trajectories(
                 policy=policy,
                 policy_generation=policy_generation,
@@ -311,6 +398,7 @@ The validation set you pass in will directly be used for validation with no addi
 
             print("🚀 Running async GRPO training")
 
+            log_mlperf_run_start(mlperf_logger, config, grpo_state)
             # Run async GRPO training
             async_grpo_train(
                 policy=policy,
@@ -333,6 +421,7 @@ The validation set you pass in will directly be used for validation with no addi
         else:
             print("🚀 Running synchronous GRPO training")
 
+            log_mlperf_run_start(mlperf_logger, config, grpo_state)
             # Run standard GRPO training
             grpo_train(
                 policy,
@@ -350,6 +439,8 @@ The validation set you pass in will directly be used for validation with no addi
                 processor=processor,
             )
     finally:
+        if mlperf_logger is not None:
+            mlperf_logger.finalize()
         shutdown_environments(task_to_env, val_task_to_env)
         try:
             policy_generation.shutdown()
